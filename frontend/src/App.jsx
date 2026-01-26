@@ -1,164 +1,138 @@
 import { useState } from "react";
 
-const API_BASE = "http://localhost:8000";
+const initialPlan = { plan_steps: [], motivation_message: "" };
 
 export default function App() {
-  const [user, setUser] = useState(null);
-  const [jobs, setJobs] = useState([]);
-  const [plan, setPlan] = useState(null);
-  const [note, setNote] = useState("");
-  const [status, setStatus] = useState("");
+  const [jobId, setJobId] = useState("1");
+  const [jobTitle, setJobTitle] = useState("Yeni İş");
+  const [jobDescription, setJobDescription] = useState("Görevin kısa açıklaması");
+  const [plan, setPlan] = useState(initialPlan);
+  const [feedback, setFeedback] = useState("");
+  const [failureReason, setFailureReason] = useState("");
+  const [status, setStatus] = useState("Hazır");
 
-  async function createDemoUser() {
-    setStatus("Kullanıcı oluşturuluyor...");
-    const response = await fetch(`${API_BASE}/users`, {
+  const fetchPlan = async () => {
+    setStatus("Plan oluşturuluyor...");
+    const response = await fetch(`/jobs/${jobId}/ai-plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        email: "demo@sanalboss.io",
-        name: "Demo Kullanıcı",
+        job_title: jobTitle,
+        job_description: jobDescription,
       }),
     });
-
     if (!response.ok) {
-      setStatus("Kullanıcı zaten var, listeler yükleniyor.");
+      setStatus("Plan oluşturulamadı.");
+      return;
     }
-
-    const userResponse = response.ok
-      ? response
-      : await fetch(`${API_BASE}/users`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email: `demo-${Date.now()}@sanalboss.io`,
-            name: "Yeni Demo Kullanıcı",
-          }),
-        });
-
-    const userData = await userResponse.json();
-    setUser(userData);
-    await loadJobs(userData.id);
-    setStatus("Kullanıcı hazır.");
-  }
-
-  async function loadJobs(userId) {
-    const response = await fetch(`${API_BASE}/users/${userId}/jobs`);
-    const data = await response.json();
-    setJobs(data);
-  }
-
-  async function createJob(event) {
-    event.preventDefault();
-    const formData = new FormData(event.target);
-    const response = await fetch(`${API_BASE}/users/${user.id}/jobs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        title: formData.get("title"),
-        description: formData.get("description"),
-      }),
-    });
-    const job = await response.json();
-    setJobs((prev) => [...prev, job]);
-    event.target.reset();
-  }
-
-  async function addNote(jobId) {
-    if (!note) return;
-    await fetch(`${API_BASE}/jobs/${jobId}/notes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note }),
-    });
-    setNote("");
-    setStatus("Not kaydedildi. Yeni plan için tekrar oluştur.");
-  }
-
-  async function generatePlan(jobId) {
-    const response = await fetch(`${API_BASE}/jobs/${jobId}/plan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ start_hour: 12, end_hour: 19, focus_hours: 6 }),
-    });
     const data = await response.json();
     setPlan(data);
-  }
+    setStatus("Plan hazır.");
+  };
+
+  const sendFeedback = async () => {
+    setStatus("Geri bildirim gönderiliyor...");
+    const response = await fetch(`/jobs/${jobId}/ai-plan/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        feedback,
+        failure_reason: failureReason || null,
+      }),
+    });
+    if (!response.ok) {
+      setStatus("Geri bildirim işlenemedi.");
+      return;
+    }
+    const data = await response.json();
+    setPlan(data);
+    setStatus("Yeni plan oluşturuldu.");
+  };
 
   return (
-    <div className="app">
-      <header>
-        <div>
-          <p className="eyebrow">Sanal Boss • Freelancer çalışma asistanı</p>
-          <h1>Zaman planı, hatırlatmalar ve motivasyon tek panelde.</h1>
-          <p className="subtitle">
-            İşlerini ekle, yapay zeka notlarını parçalayıp saatlik plan
-            oluştursun. Yapamadığın işlerde nedenini yaz, Sanal Boss sana
-            yönlendirme ve motivasyon versin.
-          </p>
-        </div>
-        <button onClick={createDemoUser} className="primary">
-          Demo Kullanıcı Oluştur
+    <div style={{ fontFamily: "Arial, sans-serif", padding: "2rem", maxWidth: 720 }}>
+      <h1>AI Plan Asistanı</h1>
+      <p>Durum: {status}</p>
+
+      <section style={{ marginBottom: "1.5rem" }}>
+        <h2>İş Bilgileri</h2>
+        <label>
+          İş ID
+          <input
+            value={jobId}
+            onChange={(event) => setJobId(event.target.value)}
+            style={{ display: "block", marginTop: 8, marginBottom: 12, width: "100%" }}
+          />
+        </label>
+        <label>
+          Başlık
+          <input
+            value={jobTitle}
+            onChange={(event) => setJobTitle(event.target.value)}
+            style={{ display: "block", marginTop: 8, marginBottom: 12, width: "100%" }}
+          />
+        </label>
+        <label>
+          Açıklama
+          <textarea
+            value={jobDescription}
+            onChange={(event) => setJobDescription(event.target.value)}
+            rows={3}
+            style={{ display: "block", marginTop: 8, width: "100%" }}
+          />
+        </label>
+        <button
+          onClick={fetchPlan}
+          style={{ marginTop: 12, padding: "0.6rem 1.2rem" }}
+        >
+          AI Plan Oluştur
         </button>
-      </header>
-
-      <section className="panel">
-        <h2>Bugünkü İşlerin</h2>
-        {!user && <p>İlk adım olarak demo kullanıcıyı oluştur.</p>}
-        {user && (
-          <form onSubmit={createJob} className="job-form">
-            <input name="title" placeholder="İş başlığı" required />
-            <textarea
-              name="description"
-              placeholder="Bu işte neler yapılmalı?"
-              required
-            />
-            <button type="submit">İşi Kaydet</button>
-          </form>
-        )}
-        <div className="grid">
-          {jobs.map((job) => (
-            <article key={job.id}>
-              <h3>{job.title}</h3>
-              <p>{job.description}</p>
-              <div className="actions">
-                <button onClick={() => generatePlan(job.id)}>
-                  Plan Oluştur
-                </button>
-                <button className="ghost" onClick={() => addNote(job.id)}>
-                  Notu Kaydet
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
       </section>
 
-      <section className="panel note-panel">
-        <h2>Günlük Not & Geri Bildirim</h2>
-        <textarea
-          value={note}
-          onChange={(event) => setNote(event.target.value)}
-          placeholder="İşi yapamadıysan nedenini yaz, Sanal Boss motivasyon versin."
-        />
-        {status && <p className="status">{status}</p>}
-      </section>
-
-      {plan && (
-        <section className="panel plan">
-          <h2>Plan Önerisi</h2>
-          <p>{plan.message}</p>
-          <ul>
-            {plan.plan.map((item) => (
-              <li key={`${item.start_time}-${item.task}`}>
-                <strong>
-                  {item.start_time} - {item.end_time}
-                </strong>
-                <span>{item.task}</span>
+      <section style={{ marginBottom: "1.5rem" }}>
+        <h2>Plan</h2>
+        {plan.plan_steps.length === 0 ? (
+          <p>Henüz plan yok.</p>
+        ) : (
+          <ol>
+            {plan.plan_steps.map((step, index) => (
+              <li key={`${step.title}-${index}`}>
+                <strong>{step.title}</strong> — {step.detail}
               </li>
             ))}
-          </ul>
-        </section>
-      )}
+          </ol>
+        )}
+        {plan.motivation_message ? (
+          <p style={{ marginTop: 12, fontWeight: 600 }}>{plan.motivation_message}</p>
+        ) : null}
+      </section>
+
+      <section>
+        <h2>Geri Bildirim</h2>
+        <label>
+          Ne oldu?
+          <textarea
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+            rows={3}
+            style={{ display: "block", marginTop: 8, marginBottom: 12, width: "100%" }}
+          />
+        </label>
+        <label>
+          Yapamadıysan neden?
+          <input
+            value={failureReason}
+            onChange={(event) => setFailureReason(event.target.value)}
+            style={{ display: "block", marginTop: 8, marginBottom: 12, width: "100%" }}
+          />
+        </label>
+        <button
+          onClick={sendFeedback}
+          style={{ padding: "0.6rem 1.2rem" }}
+        >
+          Geri Bildirimi Gönder
+        </button>
+      </section>
     </div>
   );
 }

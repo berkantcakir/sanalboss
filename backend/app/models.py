@@ -1,19 +1,11 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from __future__ import annotations
 
-from .db import Base
+from datetime import datetime
 
+from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import declarative_base, relationship
 
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    name = Column(String(255), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    jobs = relationship("Job", back_populates="owner", cascade="all, delete-orphan")
+Base = declarative_base()
 
 
 class Job(Base):
@@ -22,19 +14,20 @@ class Job(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String(255), nullable=False)
     description = Column(Text, nullable=False)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    owner = relationship("User", back_populates="jobs")
-    notes = relationship("JobNote", back_populates="job", cascade="all, delete-orphan")
+    plans = relationship("JobPlan", back_populates="job", cascade="all, delete-orphan")
 
 
-class JobNote(Base):
-    __tablename__ = "job_notes"
+class JobPlan(Base):
+    __tablename__ = "job_plans"
 
     id = Column(Integer, primary_key=True, index=True)
-    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False)
-    note = Column(Text, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=False, index=True)
+    plan = Column(JSON, nullable=False)
+    motivation_message = Column(Text, nullable=False)
+    feedback = Column(Text)
+    failure_reason = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    job = relationship("Job", back_populates="notes")
+    job = relationship("Job", back_populates="plans")

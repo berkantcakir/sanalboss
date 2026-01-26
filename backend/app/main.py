@@ -1,101 +1,181 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import List, Optional
+
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
 
-from . import crud, models, schemas
-from .db import Base, engine, get_db
+from .ai import LLMAdapter
+from .models import Base, Job, JobPlan
 
-Base.metadata.create_all(bind=engine)
+DATABASE_URL = "sqlite:///./app.db"
 
-app = FastAPI(title="Sanal Boss API")
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Sanalboss AI")
+adapter = LLMAdapter()
 
 
-@app.post("/users", response_model=schemas.UserRead)
-def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(models.User).filter(models.User.email == user.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="User already exists")
-    return crud.create_user(db, user)
+class PlanStepSchema(BaseModel):
+    title: str
+    detail: str
 
 
-@app.post("/users/{user_id}/jobs", response_model=schemas.JobRead)
-def create_job(user_id: int, job: schemas.JobCreate, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return crud.create_job(db, user_id, job)
+class PlanRequest(BaseModel):
+    job_title: str = Field(..., min_length=1)
+    job_description: str = Field(..., min_length=1)
 
 
-@app.get("/users/{user_id}/jobs", response_model=list[schemas.JobRead])
-def list_jobs(user_id: int, db: Session = Depends(get_db)):
-    return crud.get_user_jobs(db, user_id)
+class PlanFeedbackRequest(BaseModel):
+    feedback: str = Field(..., min_length=1)
+    failure_reason: Optional[str] = None
 
 
-@app.get("/jobs/{job_id}", response_model=schemas.JobDetail)
-def get_job(job_id: int, db: Session = Depends(get_db)):
-    job = crud.get_job(db, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job.notes = crud.get_job_notes(db, job_id)
-    return job
+class JobPlanResponse(BaseModel):
+    job_id: int
+    plan_steps: List[PlanStepSchema]
+    motivation_message: str
+    feedback: Optional[str]
+    failure_reason: Optional[str]
+    created_at: datetime
 
 
-@app.post("/jobs/{job_id}/notes", response_model=schemas.JobNoteRead)
-def add_job_note(job_id: int, note: schemas.JobNoteCreate, db: Session = Depends(get_db)):
-    job = crud.get_job(db, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return crud.create_job_note(db, job_id, note)
+def get_db() -> Session:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-@app.post("/jobs/{job_id}/plan", response_model=schemas.PlanResponse)
-def generate_plan(job_id: int, request: schemas.PlanRequest, db: Session = Depends(get_db)):
-    job = crud.get_job(db, job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+@app.on_event("startup")
+def startup() -> None:
+    Base.metadata.create_all(bind=engine)
 
-    hours = max(request.end_hour - request.start_hour, 1)
-    focus = request.focus_hours or hours
-    focus = min(focus, hours)
 
-    notes = crud.get_job_notes(db, job_id)
-    tasks = [job.description] + [note.note for note in notes]
-    steps = []
-    segment = max(1, focus // max(len(tasks), 1))
-    current = request.start_hour
+@app.post("/jobs", response_model=JobPlanResponse)
+def create_job_plan(payload: PlanRequest, db: Session = Depends(get_db)) -> JobPlanResponse:
+    job = Job(title=payload.job_title, description=payload.job_description)
+    db.add(job)
+    db.commit()
+    db.refresh(job)
 
-    for task in tasks:
-        end = min(request.end_hour, current + segment)
-        steps.append(
-            schemas.PlanItem(
-                start_time=f"{current}:00",
-                end_time=f"{end}:00",
-                task=f"{job.title}: {task}",
-            )
-        )
-        current = end
-        if current >= request.end_hour:
-            break
-
-    if not steps:
-        steps.append(
-            schemas.PlanItem(
-                start_time=f"{request.start_hour}:00",
-                end_time=f"{request.end_hour}:00",
-                task=f"{job.title}: Odaklanıp ilerleme kaydet.",
-            )
-        )
-
-    message = (
-        "Hedeflerine odaklan. Planı uygula ve gerekirse not ekle, "
-        "ben buradayım!"
+    response = adapter.generate_plan(
+        job_title=job.title,
+        job_description=job.description,
     )
-    return schemas.PlanResponse(job_id=job_id, plan=steps, message=message)
+    plan = JobPlan(
+        job_id=job.id,
+        plan=[step.__dict__ for step in response.plan_steps],
+        motivation_message=response.motivation_message,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return JobPlanResponse(
+        job_id=job.id,
+        plan_steps=[PlanStepSchema(**step) for step in plan.plan],
+        motivation_message=plan.motivation_message,
+        feedback=plan.feedback,
+        failure_reason=plan.failure_reason,
+        created_at=plan.created_at,
+    )
+
+
+@app.post("/jobs/{job_id}/ai-plan", response_model=JobPlanResponse)
+def generate_job_plan(
+    job_id: int,
+    payload: PlanRequest,
+    db: Session = Depends(get_db),
+) -> JobPlanResponse:
+    job = db.get(Job, job_id)
+    if job is None:
+        job = Job(id=job_id, title=payload.job_title, description=payload.job_description)
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+    else:
+        job.title = payload.job_title
+        job.description = payload.job_description
+        db.commit()
+
+    response = adapter.generate_plan(
+        job_title=job.title,
+        job_description=job.description,
+    )
+    plan = JobPlan(
+        job_id=job.id,
+        plan=[step.__dict__ for step in response.plan_steps],
+        motivation_message=response.motivation_message,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return JobPlanResponse(
+        job_id=job.id,
+        plan_steps=[PlanStepSchema(**step) for step in plan.plan],
+        motivation_message=plan.motivation_message,
+        feedback=plan.feedback,
+        failure_reason=plan.failure_reason,
+        created_at=plan.created_at,
+    )
+
+
+@app.post("/jobs/{job_id}/ai-plan/feedback", response_model=JobPlanResponse)
+def refine_job_plan(
+    job_id: int,
+    payload: PlanFeedbackRequest,
+    db: Session = Depends(get_db),
+) -> JobPlanResponse:
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    response = adapter.generate_plan(
+        job_title=job.title,
+        job_description=job.description,
+        feedback=payload.feedback,
+        failure_reason=payload.failure_reason,
+    )
+    plan = JobPlan(
+        job_id=job.id,
+        plan=[step.__dict__ for step in response.plan_steps],
+        motivation_message=response.motivation_message,
+        feedback=payload.feedback,
+        failure_reason=payload.failure_reason,
+    )
+    db.add(plan)
+    db.commit()
+    db.refresh(plan)
+    return JobPlanResponse(
+        job_id=job.id,
+        plan_steps=[PlanStepSchema(**step) for step in plan.plan],
+        motivation_message=plan.motivation_message,
+        feedback=plan.feedback,
+        failure_reason=plan.failure_reason,
+        created_at=plan.created_at,
+    )
+
+
+@app.get("/jobs/{job_id}/ai-plan", response_model=JobPlanResponse)
+def get_latest_plan(job_id: int, db: Session = Depends(get_db)) -> JobPlanResponse:
+    plan = (
+        db.query(JobPlan)
+        .filter(JobPlan.job_id == job_id)
+        .order_by(JobPlan.created_at.desc())
+        .first()
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return JobPlanResponse(
+        job_id=plan.job_id,
+        plan_steps=[PlanStepSchema(**step) for step in plan.plan],
+        motivation_message=plan.motivation_message,
+        feedback=plan.feedback,
+        failure_reason=plan.failure_reason,
+        created_at=plan.created_at,
+    )
